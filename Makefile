@@ -5,7 +5,6 @@ SHELL := /bin/bash
 TARGET ?= .
 
 SCANNERS_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scanners
-ROOT_DIR     := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 # Colors
 RED    := \033[0;31m
@@ -52,11 +51,7 @@ scan: ## Run ALL scanners against the target directory
 		name=$${scanner%%:*}; \
 		label=$${scanner##*:}; \
 		TOTAL=$$((TOTAL + 1)); \
-		if [ "$$name" = "scan-polinrider" ]; then \
-			bash "$(ROOT_DIR)polinrider-scanner.sh" "$(TARGET)" 2>/dev/null; \
-		else \
-			bash "$(SCANNERS_DIR)/$$name.sh" "$(TARGET)" 2>/dev/null; \
-		fi; \
+		bash "$(SCANNERS_DIR)/$$name.sh" "$(TARGET)" 2>/dev/null; \
 		rc=$$?; \
 		if [ $$rc -eq 1 ]; then \
 			FAILED=$$((FAILED + 1)); \
@@ -98,4 +93,4 @@ scan-repo: ## Run general repository security scanner
 	@bash "$(SCANNERS_DIR)/scan-repo.sh" "$(TARGET)"
 
 scan-polinrider: ## Run PolinRider malware scanner
-	@bash "$(ROOT_DIR)polinrider-scanner.sh" "$(TARGET)"
+	@bash "$(SCANNERS_DIR)/scan-polinrider.sh" "$(TARGET)"

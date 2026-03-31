@@ -134,7 +134,7 @@ make scan-polinrider TARGET=/path/to/project
 ./scanners/scan-python.sh /path/to/project
 ./scanners/scan-go.sh /path/to/project
 ./scanners/scan-repo.sh /path/to/project
-./polinrider-scanner.sh /path/to/project
+./scanners/scan-polinrider.sh /path/to/project
 ```
 
 ## Exit Codes
