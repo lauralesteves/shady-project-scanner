@@ -266,6 +266,113 @@ find "$SCAN_DIR" -type f \( -name "*.js" -o -name "*.mjs" -o -name "*.cjs" -o -n
         warn "$rel" "javascript-obfuscator pattern detected (_0x... variable names)"
     fi
 
+    # Self-rewriting string-array function (obfuscator.io string-array stage)
+    # Pattern: function X(){var Y=['...',...]; X=function(){return Y;};return X();}
+    # Works regardless of variable name (this variant uses 1-char names like 'a','br')
+    if awk '
+        /function[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\([[:space:]]*\)[[:space:]]*\{[[:space:]]*var[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=[[:space:]]*\[/ {seen=1}
+        seen && /=[[:space:]]*function[[:space:]]*\([[:space:]]*\)[[:space:]]*\{[[:space:]]*return[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*;?[[:space:]]*\}[[:space:]]*;[[:space:]]*return[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\([[:space:]]*\)/ {found=1; exit}
+        END {exit !found}
+    ' "$jsfile" 2>/dev/null; then
+        warn "$rel" "Self-rewriting string-array function (obfuscator.io string-array)"
+    fi
+
+    # Array rotation self-defending IIFE: f['push'](f['shift']())
+    # The rotation loop keeps cycling until a checksum matches; tampering breaks decoding
+    if grep -nqE "\[['\"]push['\"]\]\s*\(\s*[A-Za-z_$][A-Za-z0-9_$]*\s*\[['\"]shift['\"]\]\s*\(" "$jsfile" 2>/dev/null; then
+        warn "$rel" "Array rotation self-defending pattern (push/shift IIFE)"
+    fi
+
+    # Custom Base64 alphabet (lowercase-first - non-standard)
+    # Standard Base64 puts uppercase first; this swapped variant is the obfuscator's decoder
+    if grep -qF "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=" "$jsfile" 2>/dev/null; then
+        warn "$rel" "Lowercase-first Base64 alphabet (obfuscator string-decoder signature)"
+    fi
+
+    # Decoder cache markers: random 6-char property keys assigned {} / !![] on a function
+    # e.g. c['CFeNoz']={}, c['nrungE']=!![], b['ngSqpq']={}, b['NdfJqz']=!![]
+    if grep -nqE "[A-Za-z_$][A-Za-z0-9_$]*\[['\"][A-Za-z]{6}['\"]\]\s*=\s*(\{\s*\}|!\!?\[\])" "$jsfile" 2>/dev/null; then
+        info "$rel" "Random-key cache properties on a function (obfuscator decoder memoization)"
+    fi
+
+    # Multi-term hex arithmetic for plain integer constants
+    # e.g. (-0x60c + -0x1f2*-0xf + -0x1564) -- 3+ hex literals combined just to produce a number
+    if grep -nqE '\(-?0x[0-9a-fA-F]+\s*[+*\-]\s*-?0x[0-9a-fA-F]+\s*[+*\-]\s*-?0x[0-9a-fA-F]+\s*\)' "$jsfile" 2>/dev/null; then
+        info "$rel" "Hex-arithmetic constant obfuscation (>=3 hex literals combined inline)"
+    fi
+
+    # Silent global error handlers - malware hides crashes from victim
+    if grep -nqE "process\.on\s*\(\s*['\"]uncaughtException['\"]\s*,\s*function\s*\([^)]*\)\s*\{\s*\}\s*\)" "$jsfile" 2>/dev/null; then
+        warn "$rel" "Silent process.on('uncaughtException') handler (hides crashes)"
+    fi
+    if grep -nqE "process\.on\s*\(\s*['\"]unhandledRejection['\"]\s*,\s*function\s*\([^)]*\)\s*\{\s*\}\s*\)" "$jsfile" 2>/dev/null; then
+        warn "$rel" "Silent process.on('unhandledRejection') handler (hides promise errors)"
+    fi
+
+    # IPv4-from-octets concat chain: ''.concat(N,'.').concat(N,'.').concat(N,'.').concat(N)
+    # 3 consecutive ",'.')" arguments is a strong signal of building an IP literal at runtime
+    # to bypass static-string scanning and domain-reputation blocklists
+    if grep -nqE "(,\s*['\"]\.['\"]\s*\)){3,}" "$jsfile" 2>/dev/null; then
+        warn "$rel" "IPv4-from-octets concat chain (likely hardcoded C2 endpoint)"
+    fi
+
+    # Dropper sequence: writeFileSync with w+ flag near a spawn/exec call
+    if grep -nqE "writeFileSync\s*\([^)]+flag\s*:\s*['\"]w\+['\"]" "$jsfile" 2>/dev/null; then
+        if grep -qlE "(spawn|spawnSync|exec|execSync)\s*\(" "$jsfile" 2>/dev/null; then
+            warn "$rel" "writeFileSync(flag:'w+') + child_process call (dropper pattern)"
+        fi
+    fi
+
+    # -----------------------------------------------------------------------
+    # Dynamic-eval loader family (string-shuffle decoder + Function constructor)
+    # These packers build and run code at runtime WITHOUT any literal eval(),
+    # new Function(), or 'child_process' token, so the checks above miss them.
+    # Seen in the wild as: global[x]=require; ... sfL['constructor'](deob(blob))
+    # -----------------------------------------------------------------------
+
+    # require/module aliased onto a COMPUTED global property. Legitimate code
+    # never writes `global[x] = require` -- loaders do it so Function-built code
+    # can reach require/module from an inner scope. (Bracket index may itself
+    # contain ']', so match up to '=' rather than the first ']'.)
+    if grep -nqE "(global|globalThis)\s*\[[^=]{1,80}\]\s*=\s*(require|module)\b" "$jsfile" 2>/dev/null; then
+        warn "$rel" "Aliases require/module onto global[] (obfuscated loader bootstrap)"
+    fi
+
+    # Function constructor reached via the ['constructor'] property and invoked.
+    # x['constructor']('code')() / ''['constructor']['constructor'](...) is the
+    # eval-free remote-code-execution primitive used by these loaders.
+    if grep -nqE "\[\s*['\"]constructor['\"]\s*\]\s*(\[\s*['\"]constructor['\"]\s*\]\s*)?\(" "$jsfile" 2>/dev/null; then
+        warn "$rel" "Function constructor invoked via ['constructor'] (eval-equivalent)"
+    fi
+
+    # Custom string-permutation decoder: explode a string into a char array with
+    # charAt(), swap two indices in place, and reseed via modulo by a large
+    # constant. Requiring all three (explode + index-swap + big-modulus PRNG)
+    # keeps this off ordinary shuffle/reverse utilities that use only one or two.
+    if grep -qE '\[[A-Za-z0-9_$]+\]\s*=\s*[A-Za-z0-9_$]+\.charAt\s*\(' "$jsfile" 2>/dev/null \
+       && grep -qE '[A-Za-z0-9_$]+\[[A-Za-z0-9_$]+\]\s*=\s*[A-Za-z0-9_$]+\[[A-Za-z0-9_$]+\]\s*;\s*[A-Za-z0-9_$]+\[[A-Za-z0-9_$]+\]\s*=' "$jsfile" 2>/dev/null \
+       && grep -qE '%\s*[0-9]{5,}' "$jsfile" 2>/dev/null; then
+        warn "$rel" "Custom string-permutation decoder (charAt explode + index-swap + big-modulus reseed)"
+    fi
+
+    # Very long opaque string literal (>=400 chars) co-located with a dynamic
+    # code-exec signal -- the packed payload these loaders feed to Function().
+    # Length is measured with awk: BSD grep caps {n,} intervals at 255, so a
+    # {400,} regex would error ("invalid repetition count(s)") and silently miss.
+    # Gated on the exec signal so it does not flag ordinary long data strings.
+    longest_str=$(grep -oE "'[^']*'|\"[^\"]*\"" "$jsfile" 2>/dev/null \
+        | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }')
+    if [ "${longest_str:-0}" -ge 400 ]; then
+        if grep -qE "\[\s*['\"]constructor['\"]\s*\]|(global|globalThis)\s*\[[^=]{1,80}\]\s*=\s*(require|module)" "$jsfile" 2>/dev/null; then
+            warn "$rel" "Very long opaque string literal (${longest_str} chars) + dynamic code-exec signal (packed payload)"
+        fi
+    fi
+
+    # Heavily mangled _$_ style identifier names (hand-obfuscated loaders)
+    if grep -nqE '_\$_[0-9a-zA-Z]{2,}' "$jsfile" 2>/dev/null; then
+        info "$rel" "Mangled _\$_ identifier names (heavy obfuscation)"
+    fi
+
     # JSFuck-style obfuscation
     if grep -nqE '^\s*[!\[\]\(\)+]{50,}' "$jsfile" 2>/dev/null; then
         warn "$rel" "JSFuck-style obfuscation detected"
