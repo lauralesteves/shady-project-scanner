@@ -323,6 +323,56 @@ find "$SCAN_DIR" -type f \( -name "*.js" -o -name "*.mjs" -o -name "*.cjs" -o -n
         fi
     fi
 
+    # -----------------------------------------------------------------------
+    # Dynamic-eval loader family (string-shuffle decoder + Function constructor)
+    # These packers build and run code at runtime WITHOUT any literal eval(),
+    # new Function(), or 'child_process' token, so the checks above miss them.
+    # Seen in the wild as: global[x]=require; ... sfL['constructor'](deob(blob))
+    # -----------------------------------------------------------------------
+
+    # require/module aliased onto a COMPUTED global property. Legitimate code
+    # never writes `global[x] = require` -- loaders do it so Function-built code
+    # can reach require/module from an inner scope. (Bracket index may itself
+    # contain ']', so match up to '=' rather than the first ']'.)
+    if grep -nqE "(global|globalThis)\s*\[[^=]{1,80}\]\s*=\s*(require|module)\b" "$jsfile" 2>/dev/null; then
+        warn "$rel" "Aliases require/module onto global[] (obfuscated loader bootstrap)"
+    fi
+
+    # Function constructor reached via the ['constructor'] property and invoked.
+    # x['constructor']('code')() / ''['constructor']['constructor'](...) is the
+    # eval-free remote-code-execution primitive used by these loaders.
+    if grep -nqE "\[\s*['\"]constructor['\"]\s*\]\s*(\[\s*['\"]constructor['\"]\s*\]\s*)?\(" "$jsfile" 2>/dev/null; then
+        warn "$rel" "Function constructor invoked via ['constructor'] (eval-equivalent)"
+    fi
+
+    # Custom string-permutation decoder: explode a string into a char array with
+    # charAt(), swap two indices in place, and reseed via modulo by a large
+    # constant. Requiring all three (explode + index-swap + big-modulus PRNG)
+    # keeps this off ordinary shuffle/reverse utilities that use only one or two.
+    if grep -qE '\[[A-Za-z0-9_$]+\]\s*=\s*[A-Za-z0-9_$]+\.charAt\s*\(' "$jsfile" 2>/dev/null \
+       && grep -qE '[A-Za-z0-9_$]+\[[A-Za-z0-9_$]+\]\s*=\s*[A-Za-z0-9_$]+\[[A-Za-z0-9_$]+\]\s*;\s*[A-Za-z0-9_$]+\[[A-Za-z0-9_$]+\]\s*=' "$jsfile" 2>/dev/null \
+       && grep -qE '%\s*[0-9]{5,}' "$jsfile" 2>/dev/null; then
+        warn "$rel" "Custom string-permutation decoder (charAt explode + index-swap + big-modulus reseed)"
+    fi
+
+    # Very long opaque string literal (>=400 chars) co-located with a dynamic
+    # code-exec signal -- the packed payload these loaders feed to Function().
+    # Length is measured with awk: BSD grep caps {n,} intervals at 255, so a
+    # {400,} regex would error ("invalid repetition count(s)") and silently miss.
+    # Gated on the exec signal so it does not flag ordinary long data strings.
+    longest_str=$(grep -oE "'[^']*'|\"[^\"]*\"" "$jsfile" 2>/dev/null \
+        | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }')
+    if [ "${longest_str:-0}" -ge 400 ]; then
+        if grep -qE "\[\s*['\"]constructor['\"]\s*\]|(global|globalThis)\s*\[[^=]{1,80}\]\s*=\s*(require|module)" "$jsfile" 2>/dev/null; then
+            warn "$rel" "Very long opaque string literal (${longest_str} chars) + dynamic code-exec signal (packed payload)"
+        fi
+    fi
+
+    # Heavily mangled _$_ style identifier names (hand-obfuscated loaders)
+    if grep -nqE '_\$_[0-9a-zA-Z]{2,}' "$jsfile" 2>/dev/null; then
+        info "$rel" "Mangled _\$_ identifier names (heavy obfuscation)"
+    fi
+
     # JSFuck-style obfuscation
     if grep -nqE '^\s*[!\[\]\(\)+]{50,}' "$jsfile" 2>/dev/null; then
         warn "$rel" "JSFuck-style obfuscation detected"
